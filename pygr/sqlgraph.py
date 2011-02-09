@@ -528,21 +528,46 @@ class SQLTableBase(object, UserDict.DictMixin):
                                  specify iterSQL and iterColumns as well!')
 
         self.writeable = writeable
-        if cursor is None:
+        # IGB code BEGIN -- use sqlalchemy when present
+        if serverInfo is not None:
+            self.serverInfo = serverInfo
+        if cursor is None: # let's grab a cursor
             if serverInfo is not None: # get cursor from serverInfo
                 cursor = serverInfo.cursor()
             else: # try to read connection info from name or config file
-                name, cursor, serverInfo = get_name_cursor(name, **kwargs)
+                if not sqlalchemy_compatible(silent_fail=True):
+                    name,cursor = getNameCursor(name,**kwargs)
+                else: # USING GenericServerInfo
+                    cursor = self.serverInfo.cursor()
         else:
-            warnings.warn("The cursor argument is deprecated. Use serverInfo \
-                          instead!", DeprecationWarning, stacklevel=2)
+            warnings.warn("""The cursor argument is deprecated.  Use serverInfo instead! """,
+                          DeprecationWarning, stacklevel=2)
+
+        if cursor is None: # sqlite file or mysql server is inaccessible
+            raise(Exception('Error: Unable to to obtain a cursor from the database.\n'+\
+                            '       Check your database setting. serverInfo=%s, cursor=%s'%(serverInfo,cursor) ))
+                       
         self.cursor = cursor
         if createTable is not None: # RUN COMMAND TO CREATE THIS TABLE
             if dropIfExists: # get rid of any existing table
-                cursor.execute('drop table if exists ' + name)
+                if sqlalchemy_compatible(silent_fail=True) and serverInfo is not None and serverInfo.__class__ == GenericServerInfo:
+                    logger.warn("SQLAlchemy found. Attempting to drop table")
+                    try: # Use SQLAlchemy
+                        table = self.serverInfo.get_tableobj(name)
+                    except Exception, e:
+                        logger.warn("SQLAlchemy: table '%s' not found: %s" % (name,e))
+                        table = None
+                    if table:
+                        logger.warn("SQLAlchemy: dropping a table")
+                        table.drop()
+                else:
+                    logger.warn("Should be dropping a table")
+                    cursor.execute('drop table if exists ' + name)
             self.get_table_schema(False) # check dbtype, init _format_query
-            sql, params = self._format_query(createTable, ()) # apply macros
+            sql,params = self._format_query(createTable, ()) # apply macros
             cursor.execute(sql) # create the table
+        # IGB code END
+
         self.name = name
         if graph is not None:
             self.graph = graph
