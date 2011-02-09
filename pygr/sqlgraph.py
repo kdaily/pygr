@@ -2215,9 +2215,297 @@ class SQLiteServerInfo(DBServerInfo):
             raise ValueError('SQLite in-memory database is not picklable!')
         return DBServerInfo.__getstate__(self)
 
+class GenericServerInfo(DBServerInfo):
+    """picklable reference to an sqlalchemy-supported database.
+    IGB code
+    """
+    def __init__(self, *args, **kwargs):
+        """Takes generic dburi argument, eg, 
+            sqlite:////path/to/sqlite.db
+            mysql://user:password@host:port/database
+            postgresql://user:password@host:port/database
+        """
+        sqlalchemy_compatible(silent_fail=False) # stop before it gets too hairy
+
+        if "sqlite:///" in str(args): # obtain abspath of sqlitedb
+            args = self._abs_sqlite_path(args)
+            self._serverType = 'sqlite'
+        if "mysql://" in str(args):
+            self._serverType = 'mysql'
+        
+        DBServerInfo.__init__(self, 'sqlalchemy', *args, **kwargs)
+        self.args = args
+        self.kwargs = kwargs
+    
+    def _abs_sqlite_path(self, args):
+        """If the database engine is sqlite, obtain the absolute
+        path of the database file.
+        """
+        import os
+        new_args = []
+        for arg in args:
+            if "sqlite:///" in str(arg):
+                a = arg.split("sqlite:///")
+                new_args.append( "sqlite:///"+os.path.abspath(a[1]) ) # IS THIS A VALID FILE PATH?
+            else:
+                new_args.append(arg)
+        return tuple(new_args)
+
+    def _get_engine(self):
+        """Returns the engine for this database server."""
+        # SQLAlchemy objects imported here to avoid sqlalchemy import errors
+        # for users who want to use only DBServerInfo/SQLiteServerInfo
+        from sqlalchemy import create_engine, MetaData
+
+        try:
+            self.dbengine
+        except AttributeError:
+            self.dbengine = create_engine(*self.args, **self.kwargs)
+
+        try:
+            self.metadata
+        except AttributeError:
+            self.metadata = MetaData()
+            self.metadata.bind = self.dbengine            
+            
+        return self.dbengine
+        
+
+    def _start_connection(self):
+        """Start a new connection."""
+        try:
+            self.dbengine
+        except AttributeError:
+            self._get_engine()
+        try:
+            self._connection
+        except AttributeError:
+            self._connection = self.dbengine.pool.create_connection().get_connection()
+        try:
+            self._cursor
+        except AttributeError:
+            self._cursor = self._connection.cursor()
+            
+    def get_tableobj(self,tablename):
+        """Returns the SQLAlchemy table object."""        
+        try:
+            self.metadata
+        except AttributeError:
+            self._start_connection()
+        
+        try:
+            from sqlalchemy import Table
+        except Exception, e:
+            msg = "You need version 0.5.8 (or higher) of SQLAlchemy to take advantage of this feature."
+            raise(Exception(msg+": %s" % e.message))
+
+        #self.metadata.reflect()
+        try:    
+            #tableobj = self.metadata.tables[tablename]
+            tableobj = Table(tablename, self.metadata, useexisting=True)
+        except KeyError:
+            raise(Exception("Error: The database does not contain requested table '%s'.\
+                            There are '%s' available tables."%(tablename, len(self.metadata.tables))))
+        
+        # clean-up
+        logger.warn("SQLAlchemy: obtained table object %s" % tableobj)
+        #self.metadata.tables = {}
+        return tableobj
+
+    def get_create_table_schema(self,tablename):
+        """Returns the CREATE TABLE statement.
+        """
+        try:
+            self.dbengine
+        except AttributeError:
+            self._start_connection()
+        table_obj = self.get_tableobj(tablename)
+        engine = table_obj.metadata.bind.engine
+        dialect = table_obj.metadata.bind.dialect
+        s = dialect._show_create_table(engine,table_obj)
+        return str(s)
+
+    def get_table_schema(self, owner_obj, analyzeSchema=True, tablename=None):
+        """Obtain all of the following information required by SQLTableBase.
+            owner_obj - a SQLTableBase-derivative instance.
+            tablename - for non-sqlgraph support
+        """
+        self._start_connection()
+                
+        # setup format macros
+        try:
+            owner_obj._format_query
+        except AttributeError:
+            dbtype = self.get_engine_type() # mysql, sqlite
+            try:
+                macros = _formatMacrosDict[dbtype]
+            except KeyError:
+                raise(Exception("Error: Unsupported database back-end"))
+            owner_obj._format_query = SQLFormatDict(self.get_param_style(),
+                                                macros)
+
+        if not analyzeSchema: return
+        
+        # analyze schema information
+        owner_obj.columnName = []       
+        owner_obj.columnType = {}
+        owner_obj.description = {}
+        owner_obj.usesIntID = None
+        owner_obj.primary_key = None
+        owner_obj.indexed = {} 
+        
+        if not tablename: # FOR non-sqlgraph support
+            tablename = owner_obj.name # VALID SQLTableBase derivative???
+        tableobj = self.get_tableobj(tablename)
+        
+        #table_columns = tableobj.columns
+        # Functional solution to support sqlalchemy 0.6.6
+        #owner_obj.columnName = [col.name for col in table_columns]
+        
+        # Import the reflection package to use the Inspector class
+        try:
+            from sqlalchemy.engine import reflection
+        except Exception, e:
+            msg = "You need version 0.6.6 of SQLAlchemy to take advantage of this feature."
+            raise(Exception(msg+": %s" % e.message))
+        
+        # Instantiate an inspector using the engine
+        inspector = reflection.Inspector.from_engine(self.dbengine)
+        table_info = inspector.get_columns(tablename)
+
+        # Obtain the column names
+        owner_obj.columnName = [str(n.get('name',None)) for n in table_info]
+        
+        # Set the column type
+        owner_obj.columnType = dict([[str(n.get('name',None)),str(n.get('type',None))] for n in table_info])
+        
+        #for col in table_columns:
+        #    owner_obj.columnType[col.name]=col.type.get_col_spec() # eg, 'VARCHAR(50)'
+        
+        # Set the description
+        owner_obj.description = owner_obj.columnType
+        #owner_obj.description = dict(owner_obj.columnType) # USES ONLY column
+                                                           # names as keys()
+
+        # # Move to obj owner init?
+        # need this! what type of obj is owner_obj?
+        #logger.info("owner_obj = %s (type = %s)" % (repr(owner_obj), type(owner_obj)))
+        
+        # Obtain the primary key
+        owner_obj.usesIntID = bool(int == self.get_primary_key_type(tableobj))
+        owner_obj.primary_key = inspector.get_primary_keys(tablename)[0:1] #self.get_primary_key(tableobj, table_info=table_info)
+
+        # Obtain the indexes and create the dictionary
+        #owner_obj.indexed = {} #NOT SURE
+        #for idx in tableobj.indexes:
+        #    owner_obj.indexed[idx.name] = [c.name for c in idx.columns]
+
+        table_indexes = inspector.get_indexes(tablename)
+        owner_obj.indexed = dict([[str(n.get('name',None)),n.get('column_names',None)] for n in table_indexes])
+
+    def get_param_style(self):
+        """Retruns the parastyle for this database engine."""
+        self._start_connection()
+        return self.dbengine.dialect.paramstyle
+
+    def get_engine_type(self):
+        """Returns the type of the database engine, eg, mysql."""
+        self._start_connection()
+        return self.dbengine.dialect.name
+
+    def get_primary_key(self,tableobj=None, tablename=None, inspector=None):
+        """Returns the primary_key.
+        """
+        
+        if tablename is not None:
+            tableobj = self.get_tableobj(tablename)
+
+#        primary_keys = tableobj.primary_key.keys()
+
+        try:
+            from sqlalchemy.engine import reflection
+        except Exception, e:
+            msg = "You need version 0.6.6 of SQLAlchemy to take advantage of this feature."
+            raise(Exception(msg+": %s" % e.message))
+
+        inspector = reflection.Inspector.from_engine(self.dbengine)
+        table_info = inspector.get_clumns(tableobj.name)
+        
+        type_dict = dict([[str(n.get('name',None)),str(n.get('type',None))] for n in table_info])
+        primary_keys = inspector.get_primary_keys(tableobj.name)[0:1] # Get first primary key
+
+        try:
+            primary_key = primary_keys[0]
+        except IndexError as e:
+            primary_key = None
+            logger.warn("The specified table has no primary key! (%s)" % e)
+            msg = "The specified table has no primary key! (%s)" % tablename
+            logger.error(msg)
+             #raise(Exception(msg+": %s" % e.message)
+            
+        return primary_key
+    
+    def get_primary_key_type(self,tableobj=None,tablename=None, table_info=None):
+        """Returns the type of the primary key."""
+        if tablename is not None:
+            tableobj = self.get_tableobj(tablename)
+        #column_objs = self.get_columns(tableobj)
+        #primary_key = self.get_primary_key(tableobj)
+        #matched = filter(lambda col: str(col.name)==str(primary_key), column_objs)
+                
+        if not table_info:
+            try:
+                from sqlalchemy.engine import reflection
+            except Exception, e:
+                msg = "You need version 0.6.6 of SQLAlchemy to take advantage of this feature."
+                raise(Exception(msg+": %s" % e.message))
+
+            inspector = reflection.Inspector.from_engine(self.dbengine)
+            table_info = inspector.get_columns(tableobj.name)
+        
+        type_dict = dict([[str(n.get('name',None)),str(n.get('type',None))] for n in table_info])
+        primary_keys = inspector.get_primary_keys(tableobj.name)[0:1] # Get first primary key
+        #print "sqlgraph.py:get_primary_key_type",primary_keys,type_dict 
+
+        if primary_keys:
+            primary_key = str(primary_keys[0])
+            if "integer" in str(type_dict[primary_key]).lower():
+                return int
+            elif "char" in str(type_dict[primary_key]).lower():
+                return str
+            #else:
+            #    raise Exception("Error: Cannot match primary key type to str or int: %s" % str(col.type)) # Well...
+        else:
+             #raise(Exception("Error: Unable to determine primary key type for table %s" % (tableobj.name) ))
+            pass
+
+        #try:
+        #    col = matched[0]
+        #    if "String" in str(col.type):
+        #        return str
+        #    elif "Integer" in str(col.type):
+        #        return int
+        #    else:
+        #        raise Exception("Error: Cannot match primary key type to str or int: %s" % str(col.type)) # Well... 
+        #except IndexError:
+        #    raise(Exception("Error: Unable to determine primary key type: %s"%(matched)))
+        
+    def get_column_names(self,tableobj=None,tablename=None):
+        """Returns a list of column names.
+        """
+        if tablename is not None:
+            tableobj = self.get_tableobj(tablename)
+        return [str(col.name) for col in tableobj.columns]
+    
+    def get_columns(self,tableobj):
+        """Returns a list of SQLAlchemy column objects."""        
+        return [c for c in tableobj.columns]
+
+
 # list of DBServerInfo subclasses for different modules
 _DBServerModuleDict = dict(MySQLdb=MySQLServerInfo,
-                           sqlite3=SQLiteServerInfo)
+                           sqlite3=SQLiteServerInfo,
+                           sqlalchemy=GenericServerInfo)
 
 
 class MapView(object, UserDict.DictMixin):
