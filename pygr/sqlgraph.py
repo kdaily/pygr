@@ -2240,6 +2240,7 @@ class SQLiteServerInfo(DBServerInfo):
             raise ValueError('SQLite in-memory database is not picklable!')
         return DBServerInfo.__getstate__(self)
 
+
 class GenericServerInfo(DBServerInfo):
     """picklable reference to an sqlalchemy-supported database.
     IGB code
@@ -2311,7 +2312,7 @@ class GenericServerInfo(DBServerInfo):
         except AttributeError:
             self._cursor = self._connection.cursor()
             
-    def get_tableobj(self,tablename):
+    def get_tableobj(self, tablename):
         """Returns the SQLAlchemy table object."""        
         try:
             self.metadata
@@ -2328,13 +2329,14 @@ class GenericServerInfo(DBServerInfo):
         try:    
             #tableobj = self.metadata.tables[tablename]
             tableobj = Table(tablename, self.metadata, useexisting=True)
-        except KeyError:
+        except Exception, e:
             raise(Exception("Error: The database does not contain requested table '%s'.\
-                            There are '%s' available tables."%(tablename, len(self.metadata.tables))))
+                            There are '%s' available tables. %s"%(tablename, 
+                                                                  len(self.metadata.tables),
+                                                                  e.message)))
         
         # clean-up
-        logger.warn("SQLAlchemy: obtained table object %s" % tableobj)
-        #self.metadata.tables = {}
+        logger.warn("SQLAlchemy: obtained table object %s" % tablename)
         return tableobj
 
     def get_create_table_schema(self,tablename):
@@ -2417,8 +2419,8 @@ class GenericServerInfo(DBServerInfo):
         #logger.info("owner_obj = %s (type = %s)" % (repr(owner_obj), type(owner_obj)))
         
         # Obtain the primary key
-        owner_obj.usesIntID = bool(int == self.get_primary_key_type(tableobj))
-        owner_obj.primary_key = inspector.get_primary_keys(tablename)[0:1] #self.get_primary_key(tableobj, table_info=table_info)
+        owner_obj.usesIntID = bool(int == self.get_primary_key_type(tableobj, inspector=inspector, table_info=table_info))
+        owner_obj.primary_key = self.get_primary_key(tablename=tablename, inspector=inspector) #self.get_primary_key(tableobj, table_info=table_info)
 
         # Obtain the indexes and create the dictionary
         #owner_obj.indexed = {} #NOT SURE
@@ -2438,45 +2440,45 @@ class GenericServerInfo(DBServerInfo):
         self._start_connection()
         return self.dbengine.dialect.name
 
-    def get_primary_key(self,tableobj=None, tablename=None, inspector=None):
+    def get_primary_key(self, tableobj=None, tablename=None, inspector=None):
         """Returns the primary_key.
         """
-        
-        if tablename is not None:
+        #table_info = {}
+        primary_keys = []
+
+        if tablename is not None and tableobj==None:
             tableobj = self.get_tableobj(tablename)
-
-#        primary_keys = tableobj.primary_key.keys()
-
-        try:
-            from sqlalchemy.engine import reflection
-        except Exception, e:
-            msg = "You need version 0.6.6 of SQLAlchemy to take advantage of this feature."
-            raise(Exception(msg+": %s" % e.message))
-
-        inspector = reflection.Inspector.from_engine(self.dbengine)
-        table_info = inspector.get_clumns(tableobj.name)
+        else:
+            try:
+                from sqlalchemy.engine import reflection
+            except Exception, e:
+                msg = "You need version 0.6.6 of SQLAlchemy to take advantage of this feature."
+                raise(Exception(msg+": %s" % e.message))
         
-        type_dict = dict([[str(n.get('name',None)),str(n.get('type',None))] for n in table_info])
-        primary_keys = inspector.get_primary_keys(tableobj.name)[0:1] # Get first primary key
+        if not inspector:
+            inspector = reflection.Inspector.from_engine(self.dbengine)
+        #table_info = inspector.get_columns(tableobj.name)
+        
+        #type_dict = dict([[str(n.get('name',None)),str(n.get('type',None))] for n in table_info])
+        primary_keys = inspector.get_primary_keys(tableobj.name) # Get first primary key
 
         try:
             primary_key = primary_keys[0]
+            primary_key = str(primary_key)
         except IndexError as e:
             primary_key = None
-            logger.warn("The specified table has no primary key! (%s)" % e)
-            msg = "The specified table has no primary key! (%s)" % tablename
-            logger.error(msg)
+            msg = "IGB: The specified table has no primary key! (%s)" % tablename
+            logger.warn(msg)
              #raise(Exception(msg+": %s" % e.message)
             
         return primary_key
     
-    def get_primary_key_type(self,tableobj=None,tablename=None, table_info=None):
+    def get_primary_key_type(self, tableobj=None, tablename=None, table_info=None, inspector=None):
         """Returns the type of the primary key."""
-        if tablename is not None:
+        primary_keys = [] # Schema could have multiple keys (candidate + others)
+
+        if tablename is not None and tableobj==None:
             tableobj = self.get_tableobj(tablename)
-        #column_objs = self.get_columns(tableobj)
-        #primary_key = self.get_primary_key(tableobj)
-        #matched = filter(lambda col: str(col.name)==str(primary_key), column_objs)
                 
         if not table_info:
             try:
@@ -2485,35 +2487,34 @@ class GenericServerInfo(DBServerInfo):
                 msg = "You need version 0.6.6 of SQLAlchemy to take advantage of this feature."
                 raise(Exception(msg+": %s" % e.message))
 
+        if not inspector:
             inspector = reflection.Inspector.from_engine(self.dbengine)
+
+        if not table_info:
             table_info = inspector.get_columns(tableobj.name)
         
         type_dict = dict([[str(n.get('name',None)),str(n.get('type',None))] for n in table_info])
         primary_keys = inspector.get_primary_keys(tableobj.name)[0:1] # Get first primary key
-        #print "sqlgraph.py:get_primary_key_type",primary_keys,type_dict 
 
+        logger.warn("get_primary_key_type: %s" % (primary_keys)) 
         if primary_keys:
-            primary_key = str(primary_keys[0])
+            try:
+                primary_key = primary_keys[0]
+                primary_key = str(primary_key)
+            except IndexError as e:
+                primary_key = None
+                msg = "IGB: The specified table has no primary key! (%s)" % tablename
+                logger.warn(msg)
+
             if "integer" in str(type_dict[primary_key]).lower():
                 return int
             elif "char" in str(type_dict[primary_key]).lower():
                 return str
-            #else:
-            #    raise Exception("Error: Cannot match primary key type to str or int: %s" % str(col.type)) # Well...
+            else:
+                return str # default
         else:
              #raise(Exception("Error: Unable to determine primary key type for table %s" % (tableobj.name) ))
             pass
-
-        #try:
-        #    col = matched[0]
-        #    if "String" in str(col.type):
-        #        return str
-        #    elif "Integer" in str(col.type):
-        #        return int
-        #    else:
-        #        raise Exception("Error: Cannot match primary key type to str or int: %s" % str(col.type)) # Well... 
-        #except IndexError:
-        #    raise(Exception("Error: Unable to determine primary key type: %s"%(matched)))
         
     def get_column_names(self,tableobj=None,tablename=None):
         """Returns a list of column names.
