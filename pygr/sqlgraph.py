@@ -503,6 +503,25 @@ _schemaModuleDict = {'MySQLdb.cursors': mysql_table_schema,
                      'sqlite3': sqlite_table_schema}
 
 
+def sqlalchemy_compatible(silent_fail=False):
+    '''check whether sqlalchemy is present and functional
+    IGB code
+    '''
+    import sys
+    if sys.version_info < (2, 4):
+        if not silent_fail:
+            raise(Exception("Error: Python version 2.4+ required."))
+        else:
+            return False
+    try:
+        import sqlalchemy
+    except ImportError, e:
+        if not silent_fail:
+            raise(Exception("Error: SQLAlchemy required: %s" % e))
+        else:
+            return False
+    return True
+
 class SQLTableBase(object, UserDict.DictMixin):
     "Store information about an SQL table as dict keyed by primary key"
     _schemaModuleDict = _schemaModuleDict # default module list
@@ -891,6 +910,7 @@ def getKeys(self, queryOption='', selectCols=None):
         selectCols=self.primary_key
     if queryOption=='' and self.orderBy is not None:
         queryOption = self.orderBy # apply default ordering
+    logger.info("getKeys: self=%s, name=%s, queryOption=%s, selectCols=%s" % (self, self.name, queryOption, selectCols))
     self.cursor.execute('select %s from %s %s'
                         % (selectCols, self.name, queryOption))
     # Get all at once, since other calls may reuse this cursor.
@@ -904,22 +924,31 @@ def iter_keys(self, selectCols=None, orderBy='', map_f=iter,
         selectCols = self.primary_key
     if orderBy == '' and self.orderBy is not None:
         orderBy = self.orderBy # apply default ordering
-    cursor = self.get_new_cursor()
+    
+    logger.info("!! what is the caller obj: %s, %s" % (self, type(self)))
+    logger.info("!! let's peek at the object: %s" % (dir(self)))
+    cursor = self.get_new_cursor() # Oooh, I see you.
+    logger.info("!! inside iter_keys. What is cursor type: %s" % cursor)
     if cursor: # got our own cursor, guaranteeing query isolation
         if hasattr(self.serverInfo, 'iter_keys') \
            and self.serverInfo.custom_iter_keys:
             # use custom iter_keys() method from serverInfo
+            logger.info("use custom iter_keys() method from serverInfo")
             return self.serverInfo.iter_keys(self, cursor,
                                              selectCols=selectCols,
                                              map_f=map_f, orderBy=orderBy,
                                              cache_f=cache_f, **kwargs)
         else:
+            logger.info("!!!!!!!!!!!!!!!!!! NOT use custom iter_keys() method from serverInfo %s" % self.serverInfo.args)
+            logger.info("!! parent object: %s" % self)
+            logger.info("!! cursor object: %s. kwargs: %s" % (cursor,kwargs)) 
             self._select(cursor=cursor, selectCols=selectCols,
                          orderBy=orderBy, **kwargs)
             return self.generic_iterator(cursor=cursor, cache_f=cache_f,
                                          map_f=map_f,
                                          cursorHolder=CursorCloser(cursor))
     else: # must pre-fetch all keys to ensure query isolation
+        logger.info("!!!!!!!!!!!! pre-fetch all keys to ensure query isolation")
         if get_f is not None:
             return iter(get_f())
         else:
@@ -1430,9 +1459,10 @@ class SQLGraph(SQLTableMultiNoCache):
 
     def __init__(self, name, *l, **kwargs):
         graphArgs, tableArgs = split_kwargs(kwargs,
-                    ('attrAlias', 'defaultColumnType', 'columnAttrs',
-                     'sourceDB', 'targetDB', 'edgeDB', 'simpleKeys',
-                     'unpack_edge', 'edgeDictClass', 'graph'))
+                                            #('attrAlias', 'defaultColumnType', 'columnAttrs',
+                                             ('defaultColumnType', 'columnAttrs',
+                                              'sourceDB', 'targetDB', 'edgeDB', 'simpleKeys',
+                                              'unpack_edge', 'edgeDictClass', 'graph'))
         if 'createTable' in kwargs: # CREATE A SCHEMA FOR THIS TABLE
             c = getColumnTypes(**kwargs)
             tableArgs['createTable'] = \
@@ -2078,6 +2108,8 @@ class DBServerInfo(object):
         self.kwargs = kwargs
         self.serverSideCursors = serverSideCursors
         self.custom_iter_keys = blockIterators
+        logger.info("serverSideCursors=%s, blockIterators=%s" % (serverSideCursors, blockIterators))
+
         if self.serverSideCursors and not self.custom_iter_keys:
             raise ValueError('serverSideCursors=True requires \
                              blockIterators=True!')
@@ -2259,7 +2291,7 @@ class GenericServerInfo(DBServerInfo):
         if "mysql://" in str(args):
             self._serverType = 'mysql'
         
-        DBServerInfo.__init__(self, 'sqlalchemy', *args, **kwargs)
+        DBServerInfo.__init__(self, 'sqlalchemy') #, *args, **kwargs)
         self.args = args
         self.kwargs = kwargs
     
@@ -2311,6 +2343,11 @@ class GenericServerInfo(DBServerInfo):
             self._cursor
         except AttributeError:
             self._cursor = self._connection.cursor()
+    
+    def new_cursor(self, *args, **kwargs):
+        logger.info("GenericServerInfo: %s, %s" %(args, kwargs))
+        self._start_connection()
+        return self._connection.cursor()
             
     def get_tableobj(self, tablename):
         """Returns the SQLAlchemy table object."""        
@@ -2526,6 +2563,17 @@ class GenericServerInfo(DBServerInfo):
     def get_columns(self,tableobj):
         """Returns a list of SQLAlchemy column objects."""        
         return [c for c in tableobj.columns]
+
+    # Copied from MysqlServerInfo
+    def iter_keys(self, db, cursor, map_f=iter,
+                  cache_f=lambda x: [t[0] for t in x], **kwargs):
+        block_iterator = BlockIterator(db, cursor, **kwargs)
+        try:
+            cache_f = block_iterator.cache_f
+        except AttributeError:
+            pass
+        return db.generic_iterator(cursor=cursor, cache_f=cache_f,
+                                   map_f=map_f, fetch_f=block_iterator)
 
 
 # list of DBServerInfo subclasses for different modules
