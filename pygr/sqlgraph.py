@@ -400,6 +400,7 @@ def sqlite_table_schema(self, analyzeSchema=True):
         self.columnName.append(field) # list of columns in same order as table
         self.description[field] = self.cursor.description[icol]
         self.columnType[field] = c[2] # SQL COLUMN TYPE
+    logger.info("column types: %s" % self.columnType)
     # Get primary key / unique indexes.
     self.cursor.execute('select name from sqlite_master where tbl_name="%s" \
                         and type="index" and sql is null' % self.name)
@@ -410,6 +411,7 @@ def sqlite_table_schema(self, analyzeSchema=True):
             self.primary_key = l[0][2]
             break # done searching for primary key!
     if self.primary_key is None:
+        logger.info("self.primary_key = %s" % self.primary_key)
         # Grrr, INTEGER PRIMARY KEY handled differently.
         self.cursor.execute('select sql from sqlite_master where \
                             tbl_name="%s" and type="table"' % self.name)
@@ -421,8 +423,9 @@ def sqlite_table_schema(self, analyzeSchema=True):
                     self.primary_key = col
                     break # done searching for primary key!
                 else:
-                    raise ValueError('unknown primary key %s in table %s'
-                                     % (col, self.name))
+                    logger.error('unknown primary key %s in table %s' % (col, self.name))
+                                 # raise ValueError('unknown primary key %s in table %s'
+                                 #                  % (col, self.name))
     if self.primary_key is not None: # check its type
         if self.columnType[self.primary_key] == 'int' or \
                self.columnType[self.primary_key] == 'integer':
@@ -485,16 +488,23 @@ class SQLFormatDict(object):
 
 def get_table_schema(self, analyzeSchema=True):
     'run the right schema function based on type of db server connection'
+
     try:
         modname = self.cursor.__class__.__module__
     except AttributeError:
         raise ValueError('no cursor object or module information!')
-    try:
-        schema_func = self._schemaModuleDict[modname]
-    except KeyError:
-        raise KeyError('''unknown db module: %s. Use _schemaModuleDict
-        attribute to supply a method for obtaining table schema
-        for this module''' % modname)
+    try: # IGB Code
+        schema_func = self.serverInfo.get_table_schema
+    except AttributeError:
+        logger.info("Pygr serverinfo")
+    
+        try:
+            schema_func = self._schemaModuleDict[modname]
+        except KeyError:
+            raise KeyError('''unknown db module: %s. Use _schemaModuleDict
+                  attribute to supply a method for obtaining table schema
+                  for this module''' % modname)
+    # logger.info("Using get_table_scheme for module %s for object %s" % (modname, self))
     schema_func(self, analyzeSchema) # run the schema function
 
 
@@ -533,6 +543,7 @@ class SQLTableBase(object, UserDict.DictMixin):
                  serverInfo=None, autoGC=True, orderBy=None,
                  writeable=False, iterSQL=None, iterColumns=None,
                  primaryKey=None, allowNonUniqueID=False, **kwargs):
+
         if autoGC: # automatically garbage collect unused objects
             self._weakValueDict = RecentValueDictionary(autoGC) # object cache
         else:
@@ -584,7 +595,12 @@ class SQLTableBase(object, UserDict.DictMixin):
                     cursor.execute('drop table if exists ' + name)
             self.get_table_schema(False) # check dbtype, init _format_query
             sql,params = self._format_query(createTable, ()) # apply macros
-            cursor.execute(sql) # create the table
+            try:
+                cursor.execute(sql) # create the table
+            except Exception as e:
+                logger.error("Tried to execute '%s'" % sql)
+                raise e
+            
         # IGB code END
 
         self.name = name
@@ -595,10 +611,13 @@ class SQLTableBase(object, UserDict.DictMixin):
         if arraysize is not None:
             self.arraysize = arraysize
             cursor.arraysize = arraysize
+            
         self.get_table_schema() # get schema of columns to serve as attrs
         if primaryKey is not None:
             self.primary_key = primaryKey
             self.primaryKey = primaryKey
+            logger.info("AFTER get_table_schema, self.primaryKey is %s, passed primary key is %s" % (self.primaryKey, primaryKey))
+
         self.allowNonUniqueID = allowNonUniqueID
         self.data = {} # map of all attributes, including aliases
         for icol, field in enumerate(self.columnName):
@@ -910,7 +929,7 @@ def getKeys(self, queryOption='', selectCols=None):
         selectCols=self.primary_key
     if queryOption=='' and self.orderBy is not None:
         queryOption = self.orderBy # apply default ordering
-    logger.info("getKeys: self=%s, name=%s, queryOption=%s, selectCols=%s" % (self, self.name, queryOption, selectCols))
+    #logger.info("getKeys: self=%s, name=%s, queryOption=%s, selectCols=%s" % (self, self.name, queryOption, selectCols))
     self.cursor.execute('select %s from %s %s'
                         % (selectCols, self.name, queryOption))
     # Get all at once, since other calls may reuse this cursor.
@@ -925,23 +944,23 @@ def iter_keys(self, selectCols=None, orderBy='', map_f=iter,
     if orderBy == '' and self.orderBy is not None:
         orderBy = self.orderBy # apply default ordering
     
-    logger.info("!! what is the caller obj: %s, %s" % (self, type(self)))
-    logger.info("!! let's peek at the object: %s" % (dir(self)))
+    # logger.info("!! what is the caller obj: %s, %s" % (self, type(self)))
+    # logger.info("!! let's peek at the object: %s" % (dir(self)))
     cursor = self.get_new_cursor() # Oooh, I see you.
-    logger.info("!! inside iter_keys. What is cursor type: %s" % cursor)
+    #logger.info("!! inside iter_keys. What is cursor type: %s" % cursor)
     if cursor: # got our own cursor, guaranteeing query isolation
         if hasattr(self.serverInfo, 'iter_keys') \
            and self.serverInfo.custom_iter_keys:
             # use custom iter_keys() method from serverInfo
-            logger.info("use custom iter_keys() method from serverInfo")
+            #logger.info("use custom iter_keys() method from serverInfo")
             return self.serverInfo.iter_keys(self, cursor,
                                              selectCols=selectCols,
                                              map_f=map_f, orderBy=orderBy,
                                              cache_f=cache_f, **kwargs)
         else:
-            logger.info("!!!!!!!!!!!!!!!!!! NOT use custom iter_keys() method from serverInfo %s" % self.serverInfo.args)
-            logger.info("!! parent object: %s" % self)
-            logger.info("!! cursor object: %s. kwargs: %s" % (cursor,kwargs)) 
+            logger.info("!!!!!!!!!!!!!!!!!! NOT use custom iter_keys() method from serverInfo %s" % repr(self.serverInfo.args))
+            #logger.info("!! parent object: %s" % self)
+            #logger.info("!! cursor object: %s. kwargs: %s" % (cursor,kwargs)) 
             self._select(cursor=cursor, selectCols=selectCols,
                          orderBy=orderBy, **kwargs)
             return self.generic_iterator(cursor=cursor, cache_f=cache_f,
@@ -2108,7 +2127,7 @@ class DBServerInfo(object):
         self.kwargs = kwargs
         self.serverSideCursors = serverSideCursors
         self.custom_iter_keys = blockIterators
-        logger.info("serverSideCursors=%s, blockIterators=%s" % (serverSideCursors, blockIterators))
+        #logger.info("serverSideCursors=%s, blockIterators=%s" % (serverSideCursors, blockIterators))
 
         if self.serverSideCursors and not self.custom_iter_keys:
             raise ValueError('serverSideCursors=True requires \
@@ -2160,6 +2179,7 @@ class MySQLServerInfo(DBServerInfo):
             return DBServerInfo.new_cursor(self, arraysize)
         try:
             conn = self._conn_sscursor
+            logger.info("Using SSCursor")
         except AttributeError:
             self._conn_sscursor, cursor = mysql_connect(useStreaming=True,
                                                         *self.args,
@@ -2167,6 +2187,7 @@ class MySQLServerInfo(DBServerInfo):
         else:
             cursor = self._conn_sscursor.cursor()
         if arraysize is not None:
+            logger.info("arraysize = %s" % arraysize)
             cursor.arraysize = arraysize
         return cursor
 
@@ -2180,11 +2201,17 @@ class MySQLServerInfo(DBServerInfo):
 
     def iter_keys(self, db, cursor, map_f=iter,
                   cache_f=lambda x: [t[0] for t in x], **kwargs):
+
         block_iterator = BlockIterator(db, cursor, **kwargs)
+        logger.info("kwargs: %s" % kwargs)
+        
         try:
             cache_f = block_iterator.cache_f
         except AttributeError:
             pass
+        
+        logger.info("cache_f = %s" % cache_f)
+
         return db.generic_iterator(cursor=cursor, cache_f=cache_f,
                                    map_f=map_f, fetch_f=block_iterator)
 
@@ -2272,6 +2299,10 @@ class SQLiteServerInfo(DBServerInfo):
             raise ValueError('SQLite in-memory database is not picklable!')
         return DBServerInfo.__getstate__(self)
 
+# IGB code: Used by GenericServerInfo to support mysql/sqlite query format                                                                                                        
+_formatMacrosDict = {'mysql':_mysqlMacros,
+                     'sqlite':_sqliteMacros}
+
 
 class GenericServerInfo(DBServerInfo):
     """picklable reference to an sqlalchemy-supported database.
@@ -2282,6 +2313,11 @@ class GenericServerInfo(DBServerInfo):
             sqlite:////path/to/sqlite.db
             mysql://user:password@host:port/database
             postgresql://user:password@host:port/database
+
+            Note that when instantiating this class, all you really need to pass
+            is the dburi. The custom iterator has been copied directly from the
+            MysqlServerInfo; but this might not be compatible with sqlite tables.
+
         """
         sqlalchemy_compatible(silent_fail=False) # stop before it gets too hairy
 
@@ -2291,7 +2327,8 @@ class GenericServerInfo(DBServerInfo):
         if "mysql://" in str(args):
             self._serverType = 'mysql'
         
-        DBServerInfo.__init__(self, 'sqlalchemy') #, *args, **kwargs)
+        DBServerInfo.__init__(self, 'sqlalchemy', *args, **kwargs) # IGB
+
         self.args = args
         self.kwargs = kwargs
     
@@ -2318,7 +2355,18 @@ class GenericServerInfo(DBServerInfo):
         try:
             self.dbengine
         except AttributeError:
-            self.dbengine = create_engine(*self.args, **self.kwargs)
+            # we're handling passing of dburi, which must be an arg, not a kwarg for sqlalchemy
+            new_kwargs = self.kwargs.copy()
+            new_args = list(self.args)
+
+            try:
+                dburi = new_kwargs.pop("dburi")
+                new_args.insert(0, dburi)
+                new_args = tuple(new_args)
+            except KeyError:
+                pass
+            
+            self.dbengine = create_engine(*new_args, **new_kwargs)
 
         try:
             self.metadata
@@ -2343,12 +2391,42 @@ class GenericServerInfo(DBServerInfo):
             self._cursor
         except AttributeError:
             self._cursor = self._connection.cursor()
-    
-    def new_cursor(self, *args, **kwargs):
-        logger.info("GenericServerInfo: %s, %s" %(args, kwargs))
+
+    ## ORIGINAL IGB CODE
+    # def new_cursor(self, *args, **kwargs):
+    #     logger.info("GenericServerInfo: %s, %s" %(args, kwargs))
+    #     self._start_connection()
+    #     return self._connection.cursor()
+
+    def new_cursor(self, arraysize=None):
+        logger.debug("Using new cursor in GenericServerInfo")
         self._start_connection()
-        return self._connection.cursor()
+        cursor = self._connection.cursor()
+        
+        try:
+            assert self.dbengine.driver == "mysqldb"
+        except AssertionError:
+            logger.info("Streaming cursor only supported by MySQL")
+            return cursor
+        
+        if not self.serverSideCursors: # use regular MySQLdb cursor
+            logger.info("Not using serverSideCursors")
+            return cursor
+        
+        try:
+            from MySQLdb import cursors
+            cursor.cursorclass = cursors.SSCursor
+            self._conn_sscursor = cursor.connection
+            logger.info("Using SSCursor")
+        except Exception as e:
+            return cursor
             
+        if arraysize is not None:
+            logger.info("using arraysize %s" % arraysize)
+            cursor.arraysize = arraysize
+        
+        return cursor
+
     def get_tableobj(self, tablename):
         """Returns the SQLAlchemy table object."""        
         try:
@@ -2416,6 +2494,7 @@ class GenericServerInfo(DBServerInfo):
         owner_obj.description = {}
         owner_obj.usesIntID = None
         owner_obj.primary_key = None
+        owner_obj.primaryKey = None # IGB Note: for pygr compatibility
         owner_obj.indexed = {} 
         
         if not tablename: # FOR non-sqlgraph support
@@ -2458,6 +2537,7 @@ class GenericServerInfo(DBServerInfo):
         # Obtain the primary key
         owner_obj.usesIntID = bool(int == self.get_primary_key_type(tableobj, inspector=inspector, table_info=table_info))
         owner_obj.primary_key = self.get_primary_key(tablename=tablename, inspector=inspector) #self.get_primary_key(tableobj, table_info=table_info)
+        owner_obj.primaryKey = owner_obj.primary_key # IGB Note: for pygr compatibility
 
         # Obtain the indexes and create the dictionary
         #owner_obj.indexed = {} #NOT SURE
@@ -2564,14 +2644,38 @@ class GenericServerInfo(DBServerInfo):
         """Returns a list of SQLAlchemy column objects."""        
         return [c for c in tableobj.columns]
 
+    # def iter_keys(self, db, cursor, map_f=iter,
+    #               cache_f=lambda x: [t[0] for t in x], **kwargs):
+    #     block_iterator = BlockIterator(db, cursor, **kwargs)
+    #     logger.info("kwargs: %s" % kwargs)
+        
+    #     try:
+    #         cache_f = block_iterator.cache_f
+    #     except AttributeError:
+    #         pass
+        
+    #     logger.info("cache_f = %s" % cache_f)
+
+    #     return db.generic_iterator(cursor=cursor, cache_f=cache_f,
+    #                                map_f=map_f, fetch_f=block_iterator)
+
     # Copied from MysqlServerInfo
+    # IGB Code
     def iter_keys(self, db, cursor, map_f=iter,
                   cache_f=lambda x: [t[0] for t in x], **kwargs):
+        """This custom iterator method was copied from the MysqlServerInfo class.
+        """
+
+        logger.info("kwargs: %s" % kwargs)
+        
         block_iterator = BlockIterator(db, cursor, **kwargs)
         try:
             cache_f = block_iterator.cache_f
-        except AttributeError:
+        except AttributeError as e:
+            logger.error("Couldn't do caching: %s" % e)
             pass
+        logger.info("cache_f = %s" % cache_f)
+        
         return db.generic_iterator(cursor=cursor, cache_f=cache_f,
                                    map_f=map_f, fetch_f=block_iterator)
 
